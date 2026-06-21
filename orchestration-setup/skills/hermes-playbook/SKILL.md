@@ -45,7 +45,7 @@ cheap model atomizes → ElevenLabs voices → ffmpeg/Creatomate assembles.
 
 ## Connected providers & tools
 - **Providers:** OpenRouter (200+ models, default gateway — active default is `minimax/MiniMax-M3`), DeepSeek, Perplexity (sonar), MiniMax. Switch any model with `/model openrouter:<slug>`.
-- **MCP servers:** GitHub, Firecrawl, Miro.
+- **MCP servers:** GitHub, Firecrawl, Miro, **Context7** (live library/API/SDK documentation — use before writing integration code).
 - **Audio:** ElevenLabs (`ELEVENLABS_API_KEY`). **Images/video:** Replicate (`REPLICATE_API_TOKEN` in `.env` — FLUX Schnell, Recraft V3, Hailuo, Veo 3, Veo 3 Fast). Prefer the `image-gen` and `video-gen` skill CLI commands (`hermes-image`, `hermes-video`, `hermes-video-kling`); fall back to direct `requests` calls only when the CLI times out. FAL is NOT connected (no `FAL_KEY`).
 - **Skills:** 31 Firecrawl skills, `brand-voice` (fill before use), `karina-principles` (strategic persona — load before strategy talks), `find-skills` (triggers on "how do I do X" / "is there a skill for Y" — scans local, built-in, SkillHub, GitHub, ClawHub for matching skills).
 
@@ -60,6 +60,7 @@ cheap model atomizes → ElevenLabs voices → ffmpeg/Creatomate assembles.
 - Hook `spend-audit` logs every gateway turn (model, tools, per-turn cost) to `~/.hermes/spend_audit.jsonl`.
 
 ## Conventions (always)
+- **Docs via Context7:** before coding against a library/SDK/API or wiring an MCP/service, pull current docs through the Context7 MCP (resolve → get-docs). Don't rely on memory for library specifics.
 - **Cost transparency:** when a paid tool/API runs, surface its cost.
 - **Security:** never expose secrets; if an API key is pasted in chat, advise rotating it. Keys live in `~/.hermes/.env` (perms 600).
 - **Verify** before claiming done; report failures honestly with evidence.
