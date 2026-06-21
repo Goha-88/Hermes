@@ -1,3 +1,10 @@
+> **Fork notice** — This is a personal snapshot of [Hermes Agent](https://github.com/NousResearch/hermes-agent) by Nous Research (MIT),
+> extended with a **Perplexity integration**: a Sonar model provider, a Perplexity
+> web-search backend, and a deep-research skill (async Sonar API). Upstream commit
+> history is omitted from this snapshot — see the original repository for full history.
+
+---
+
 <p align="center">
   <img src="assets/banner.png" alt="Hermes Agent" width="100%">
 </p>
