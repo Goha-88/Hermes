@@ -1,0 +1,7 @@
+name: web-perplexity
+version: 1.0.0
+description: "Perplexity web search via the Search API (https://api.perplexity.ai/search). Real-time, web-grounded results with domain/recency filters. Requires PERPLEXITY_API_KEY — get one at https://www.perplexity.ai/settings/api."
+author: NousResearch
+kind: backend
+provides_web_providers:
+  - perplexity
