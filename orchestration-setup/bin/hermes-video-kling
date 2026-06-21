@@ -1,0 +1,68 @@
+#!/usr/bin/env python3
+"""hermes-video-kling — быстрое/дешёвое видео через Replicate Kling 2.5 Turbo Pro.
+
+Usage:  hermes-video-kling "<prompt>" [duration_sec] [output.mp4]
+        duration_sec: 5 (по умолч.) или 10.
+Топовое движение/реализм, БЕЗ нативного звука (для звука — hermes-video / Veo 3.1).
+Дешевле Veo (~$0.35 за 5с). Рендер ~1–3 мин.
+Токен берётся из окружения или ~/.hermes/.env (REPLICATE_API_TOKEN).
+"""
+import os, sys, json, time, urllib.request, pathlib, re
+
+MODEL = "kwaivgi/kling-v2.5-turbo-pro"
+
+
+def token():
+    t = os.environ.get("REPLICATE_API_TOKEN")
+    if t:
+        return t
+    env = pathlib.Path.home() / ".hermes" / ".env"
+    if env.exists():
+        for line in env.read_text().splitlines():
+            if line.startswith("REPLICATE_API_TOKEN="):
+                return line.split("=", 1)[1].strip()
+    sys.exit("REPLICATE_API_TOKEN not found")
+
+
+def api(url, tok, data=None):
+    h = {"Authorization": f"Bearer {tok}", "Content-Type": "application/json"}
+    req = urllib.request.Request(url, data=json.dumps(data).encode() if data else None,
+                                 headers=h, method="POST" if data else "GET")
+    with urllib.request.urlopen(req, timeout=120) as r:
+        return json.load(r)
+
+
+def main():
+    if len(sys.argv) < 2:
+        sys.exit('Usage: hermes-video-kling "<prompt>" [duration_sec] [output.mp4]')
+    prompt = sys.argv[1]
+    dur = int(sys.argv[2]) if len(sys.argv) > 2 and sys.argv[2].isdigit() else 5
+    out = sys.argv[3] if len(sys.argv) > 3 else None
+    tok = token()
+
+    pred = api(f"https://api.replicate.com/v1/models/{MODEL}/predictions", tok,
+               {"input": {"prompt": prompt, "duration": dur, "aspect_ratio": "16:9"}})
+    for _ in range(180):
+        if pred.get("status") in ("succeeded", "failed", "canceled"):
+            break
+        time.sleep(2)
+        pred = api(pred["urls"]["get"], tok)
+    if pred.get("status") != "succeeded":
+        sys.exit("generation failed: " + str(pred.get("error") or pred.get("status")))
+
+    output = pred["output"]
+    url = output[0] if isinstance(output, list) else output
+    raw = urllib.request.urlopen(url, timeout=300).read()
+
+    if not out:
+        cache = pathlib.Path.home() / ".hermes" / "cache"
+        cache.mkdir(exist_ok=True)
+        slug = (re.sub(r"[^a-z0-9]+", "-", prompt.lower())[:30].strip("-")) or "video"
+        out = str(cache / f"kling-{slug}-{int(time.time())}.mp4")
+    pathlib.Path(out).write_bytes(raw)
+    print(out)
+    print(f"[ok] {len(raw)} bytes · Kling 2.5 Turbo Pro · ~${0.07*dur:.2f}", file=sys.stderr)
+
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,70 @@
+#!/usr/bin/env python3
+"""hermes-image-pro — лучшее качество картинки через Replicate FLUX 1.1 Pro Ultra.
+
+Usage:  hermes-image-pro "<prompt>" [aspect_ratio] [output.png]
+        aspect_ratio: 1:1 (по умолч.), 16:9, 9:16, 3:2, 4:5 и т.п.
+Печатает путь к PNG в stdout; стоимость (~$0.06/картинка) — в stderr.
+Токен берётся из окружения или ~/.hermes/.env (REPLICATE_API_TOKEN).
+"""
+import os, sys, json, time, urllib.request, pathlib, re
+
+MODEL = "black-forest-labs/flux-1.1-pro-ultra"
+
+
+def token():
+    t = os.environ.get("REPLICATE_API_TOKEN")
+    if t:
+        return t
+    env = pathlib.Path.home() / ".hermes" / ".env"
+    if env.exists():
+        for line in env.read_text().splitlines():
+            if line.startswith("REPLICATE_API_TOKEN="):
+                return line.split("=", 1)[1].strip()
+    sys.exit("REPLICATE_API_TOKEN not found")
+
+
+def api(url, tok, data=None, prefer_wait=False):
+    h = {"Authorization": f"Bearer {tok}", "Content-Type": "application/json"}
+    if prefer_wait:
+        h["Prefer"] = "wait"
+    req = urllib.request.Request(url, data=json.dumps(data).encode() if data else None,
+                                 headers=h, method="POST" if data else "GET")
+    with urllib.request.urlopen(req, timeout=120) as r:
+        return json.load(r)
+
+
+def main():
+    if len(sys.argv) < 2:
+        sys.exit('Usage: hermes-image-pro "<prompt>" [aspect_ratio] [output.png]')
+    prompt = sys.argv[1]
+    aspect = sys.argv[2] if len(sys.argv) > 2 else "1:1"
+    out = sys.argv[3] if len(sys.argv) > 3 else None
+    tok = token()
+
+    pred = api(f"https://api.replicate.com/v1/models/{MODEL}/predictions", tok,
+               {"input": {"prompt": prompt, "aspect_ratio": aspect, "output_format": "png"}})
+    # poll until finished (FLUX Ultra обычно 10–20с)
+    for _ in range(60):
+        if pred.get("status") in ("succeeded", "failed", "canceled"):
+            break
+        time.sleep(2)
+        pred = api(pred["urls"]["get"], tok)
+    if pred.get("status") != "succeeded":
+        sys.exit("generation failed: " + str(pred.get("error") or pred.get("status")))
+
+    output = pred["output"]
+    url = output[0] if isinstance(output, list) else output
+    raw = urllib.request.urlopen(url, timeout=120).read()
+
+    if not out:
+        cache = pathlib.Path.home() / ".hermes" / "image_cache"
+        cache.mkdir(exist_ok=True)
+        slug = (re.sub(r"[^a-z0-9]+", "-", prompt.lower())[:30].strip("-")) or "image"
+        out = str(cache / f"flux-{slug}-{int(time.time())}.png")
+    pathlib.Path(out).write_bytes(raw)
+    print(out)
+    print(f"[ok] {len(raw)} bytes · FLUX 1.1 Pro Ultra · ~$0.06", file=sys.stderr)
+
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,12 @@
+# секреты и личные данные — НИКОГДА не коммитить
+.env
+*.db
+*.db-shm
+*.db-wal
+auth.json
+memories/
+spend_audit.jsonl
+spend_ledger.md
+__pycache__/
+*.pyc
+_last_cost.json

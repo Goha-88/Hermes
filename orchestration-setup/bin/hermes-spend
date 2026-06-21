@@ -1,0 +1,239 @@
+#!/usr/bin/env python3
+"""hermes-spend — единый отчёт о тратах на Hermes.
+
+Сводит два источника:
+  1. LLM-вызовы самого агента Hermes  ->  ~/.hermes/state.db (таблица sessions)
+  2. Платные инструменты, вызванные Claude -> ~/.hermes/spend_ledger.md
+
+Использование:
+  hermes-spend                 краткая сводка + общий итог
+  hermes-spend --sessions [N]  + список N последних сессий (по умолчанию 10)
+  hermes-spend --json          машиночитаемый вывод (JSON)
+
+Переменные окружения:
+  HERMES_HOME   каталог данных Hermes (по умолчанию ~/.hermes)
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import sqlite3
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+
+
+def hermes_home() -> Path:
+    return Path(os.environ.get("HERMES_HOME", str(Path.home() / ".hermes")))
+
+
+def load_agent_spend(db_path: Path):
+    """Читает траты LLM-вызовов агента из sessions. Возвращает (rows, totals)."""
+    if not db_path.exists():
+        return [], {}
+    con = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+    con.row_factory = sqlite3.Row
+    try:
+        cur = con.execute(
+            """
+            SELECT
+                COALESCE(billing_provider, 'unknown') AS provider,
+                COALESCE(model, 'unknown')            AS model,
+                COUNT(*)                              AS sessions,
+                SUM(COALESCE(input_tokens, 0))        AS input_tokens,
+                SUM(COALESCE(output_tokens, 0))       AS output_tokens,
+                SUM(COALESCE(cache_read_tokens, 0))   AS cache_read_tokens,
+                SUM(COALESCE(reasoning_tokens, 0))    AS reasoning_tokens,
+                SUM(COALESCE(actual_cost_usd, estimated_cost_usd, 0)) AS cost,
+                SUM(CASE WHEN actual_cost_usd IS NOT NULL THEN 1 ELSE 0 END) AS actual_rows
+            FROM sessions
+            WHERE archived = 0
+            GROUP BY provider, model
+            ORDER BY cost DESC
+            """
+        )
+        rows = [dict(r) for r in cur.fetchall()]
+    finally:
+        con.close()
+    totals = {
+        "cost": sum(r["cost"] for r in rows),
+        "sessions": sum(r["sessions"] for r in rows),
+        "input_tokens": sum(r["input_tokens"] for r in rows),
+        "output_tokens": sum(r["output_tokens"] for r in rows),
+        # estimated, если ни у одной сессии в группе нет actual
+        "all_estimated": all(r["actual_rows"] == 0 for r in rows) if rows else True,
+    }
+    return rows, totals
+
+
+def load_recent_sessions(db_path: Path, limit: int):
+    if not db_path.exists():
+        return []
+    con = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+    con.row_factory = sqlite3.Row
+    try:
+        cur = con.execute(
+            """
+            SELECT started_at, billing_provider, model, title,
+                   COALESCE(actual_cost_usd, estimated_cost_usd, 0) AS cost,
+                   cost_status, input_tokens, output_tokens
+            FROM sessions
+            WHERE archived = 0
+            ORDER BY started_at DESC
+            LIMIT ?
+            """,
+            (limit,),
+        )
+        return [dict(r) for r in cur.fetchall()]
+    finally:
+        con.close()
+
+
+def load_audit(audit_path: Path, limit: int):
+    """Читает последние N строк поштучного аудита (spend_audit.jsonl)."""
+    if not audit_path.exists():
+        return []
+    rows = []
+    for line in audit_path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            rows.append(json.loads(line))
+        except ValueError:
+            continue
+    return rows[-limit:]
+
+
+def load_tool_spend(ledger_path: Path):
+    """Парсит markdown-таблицу журнала инструментов. Группирует по (инструмент, модель)."""
+    if not ledger_path.exists():
+        return [], {"cost": 0.0, "requests": 0}
+    groups: dict[tuple[str, str], dict] = {}
+    for line in ledger_path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line.startswith("|"):
+            continue
+        cells = [c.strip() for c in line.strip("|").split("|")]
+        if len(cells) < 6:
+            continue
+        cost_raw = cells[4].replace("$", "").replace(",", ".").strip()
+        try:
+            cost = float(cost_raw)
+        except ValueError:
+            continue  # заголовок / разделитель / нечисловая строка
+        key = (cells[1], cells[2])
+        g = groups.setdefault(key, {"tool": cells[1], "model": cells[2], "requests": 0, "cost": 0.0})
+        g["requests"] += 1
+        g["cost"] += cost
+    rows = sorted(groups.values(), key=lambda r: r["cost"], reverse=True)
+    totals = {"cost": sum(r["cost"] for r in rows), "requests": sum(r["requests"] for r in rows)}
+    return rows, totals
+
+
+def fmt_usd(x: float) -> str:
+    return f"${x:,.4f}"
+
+
+def fmt_tok(x: int) -> str:
+    return f"{x:,}".replace(",", " ")
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(add_help=True, description="Единый отчёт о тратах на Hermes")
+    ap.add_argument("--sessions", nargs="?", const=10, type=int, default=None,
+                    metavar="N", help="показать N последних сессий (по умолчанию 10)")
+    ap.add_argument("--audit", nargs="?", const=15, type=int, default=None,
+                    metavar="N", help="показать N последних запросов из spend_audit.jsonl (по умолчанию 15)")
+    ap.add_argument("--json", action="store_true", help="вывод в JSON")
+    args = ap.parse_args()
+
+    home = hermes_home()
+    db_path = home / "state.db"
+    ledger_path = home / "spend_ledger.md"
+    audit_path = home / "spend_audit.jsonl"
+
+    agent_rows, agent_tot = load_agent_spend(db_path)
+    tool_rows, tool_tot = load_tool_spend(ledger_path)
+    grand = agent_tot.get("cost", 0.0) + tool_tot["cost"]
+
+    if args.json:
+        out = {
+            "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            "agent_llm": {"by_model": agent_rows, "totals": agent_tot},
+            "tools": {"by_tool": tool_rows, "totals": tool_tot},
+            "grand_total_usd": round(grand, 6),
+        }
+        if args.sessions is not None:
+            out["recent_sessions"] = load_recent_sessions(db_path, args.sessions)
+        if args.audit is not None:
+            out["audit"] = load_audit(audit_path, args.audit)
+        print(json.dumps(out, ensure_ascii=False, indent=2))
+        return 0
+
+    W = 64
+    print("=" * W)
+    print("HERMES — сводка расходов")
+    print(datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC"))
+    print("=" * W)
+
+    # 1. Агент
+    print("\n── 1. LLM-вызовы агента Hermes (из state.db) ──")
+    if agent_rows:
+        for r in agent_rows:
+            tag = "" if r["actual_rows"] else "  (оценка)"
+            print(f"  {r['provider']}/{r['model']}")
+            print(f"      {r['sessions']} сессий · in {fmt_tok(r['input_tokens'])} / "
+                  f"out {fmt_tok(r['output_tokens'])} ток · {fmt_usd(r['cost'])}{tag}")
+        print(f"  {'-' * (W - 2)}")
+        est = "  (оценочно)" if agent_tot["all_estimated"] else ""
+        print(f"  Подытог LLM: {fmt_usd(agent_tot['cost'])}{est}")
+    else:
+        print("  нет данных (state.db пуст или отсутствует)")
+
+    # 2. Инструменты
+    print("\n── 2. Платные инструменты (журнал Claude) ──")
+    if tool_rows:
+        for r in tool_rows:
+            print(f"  {r['tool']}/{r['model']} · {r['requests']} запр. · {fmt_usd(r['cost'])}")
+        print(f"  {'-' * (W - 2)}")
+        print(f"  Подытог инструментов: {fmt_usd(tool_tot['cost'])}")
+    else:
+        print("  нет записей (~/.hermes/spend_ledger.md пуст или отсутствует)")
+
+    # Итог
+    print("\n" + "=" * W)
+    print(f"ОБЩИЙ ИТОГ: {fmt_usd(grand)}")
+    if agent_tot.get("all_estimated", False) and agent_tot.get("cost", 0) > 0:
+        print(f"   из них {fmt_usd(agent_tot['cost'])} — оценка (провайдер не отдаёт точный биллинг)")
+    print("=" * W)
+
+    # Опц. список сессий
+    if args.sessions is not None:
+        sess = load_recent_sessions(db_path, args.sessions)
+        print(f"\n── Последние {len(sess)} сессий ──")
+        for s in sess:
+            ts = datetime.fromtimestamp(s["started_at"], timezone.utc).strftime("%m-%d %H:%M")
+            title = (s["title"] or "—")[:32]
+            print(f"  {ts}  {fmt_usd(s['cost']):>10}  {s['model'] or '?':<18}  {title}")
+
+    # Опц. поштучный аудит запросов (из gateway-хука spend-audit)
+    if args.audit is not None:
+        audit = load_audit(audit_path, args.audit)
+        print(f"\n── Поштучный аудит запросов (последние {len(audit)}) ──")
+        if not audit:
+            print("  пусто — хук spend-audit ещё не записал ни одного запроса")
+        for a in audit:
+            tools = ", ".join(a.get("tools") or []) or "—"
+            print(f"  {a.get('ts','?')}  {a.get('platform','?'):<8}  "
+                  f"{(a.get('model') or '?'):<16}  {fmt_usd(a.get('turn_cost_usd',0)):>9}")
+            print(f"      инструменты: {tools}")
+
+    print("\nИсточник истины — биллинг провайдеров (perplexity.ai/settings/api, "
+          "platform.deepseek.com).")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

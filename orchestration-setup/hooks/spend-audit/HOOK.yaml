@@ -1,0 +1,6 @@
+name: spend-audit
+description: Per-request audit log (model, tools, estimated cost) for gateway turns
+events:
+  - agent:start
+  - agent:step
+  - agent:end
